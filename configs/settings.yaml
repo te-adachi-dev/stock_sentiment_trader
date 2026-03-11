@@ -1,0 +1,37 @@
+target_symbols:
+  - AAPL
+  - MSFT
+  - GOOGL
+  - AMZN
+  - NVDA
+  - META
+  - TSLA
+  - JPM
+  - V
+  - JNJ
+
+data_collection:
+  stock_price:
+    period: "1y"
+    interval: "1d"
+  news:
+    lookback_days: 365
+    max_articles_per_symbol: 500
+
+sentiment:
+  model_name: "ProsusAI/finbert"
+  batch_size: 32
+  device: "cuda"
+  max_length: 512
+
+analysis:
+  granger_max_lag: 10
+  significance_level: 0.05
+  correlation_min_threshold: 0.15
+
+api:
+  finnhub:
+    calls_per_minute: 55
+    news_category: "company"
+  newsapi:
+    requests_per_day: 95
