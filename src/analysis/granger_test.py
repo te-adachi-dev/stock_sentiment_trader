@@ -15,7 +15,7 @@ def prepare_daily_data(
 ) -> pd.DataFrame:
     stock = stock_df.copy()
     if "Date" in stock.columns:
-        stock["Date"] = pd.to_datetime(stock["Date"]).dt.tz_localize(None)
+        stock["Date"] = pd.to_datetime(stock["Date"], utc=True).dt.tz_convert(None)
     stock["date"] = pd.to_datetime(stock["Date"]).dt.date
     daily_returns = stock.groupby("date")["Returns"].mean().reset_index()
     daily_returns.columns = ["date", "returns"]

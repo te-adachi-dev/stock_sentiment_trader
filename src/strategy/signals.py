@@ -121,7 +121,7 @@ def _merge_data(
 
     tech = technical_df.copy()
     if "Date" in tech.columns:
-        tech["date"] = pd.to_datetime(tech["Date"]).dt.tz_localize(None).dt.date
+        tech["date"] = pd.to_datetime(tech["Date"], utc=True).dt.tz_convert(None).dt.date
     else:
         tech["date"] = pd.to_datetime(tech.index).date
 
