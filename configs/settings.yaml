@@ -35,3 +35,34 @@ api:
     news_category: "company"
   newsapi:
     requests_per_day: 95
+
+backtest:
+  initial_capital: 100000
+  commission_per_share: 0.005
+  slippage_pct: 0.0005
+  risk_free_rate: 0.045
+  max_position_risk: 0.02
+  atr_stop_multiplier: 2.0
+  atr_profit_multiplier: 3.0
+  max_concurrent_positions: 3
+  daily_loss_limit: 0.05
+  tier_a_symbols:
+    - GOOGL
+    - TSLA
+    - AAPL
+
+strategy:
+  threshold:
+    buy_threshold: 0.3
+    sell_threshold: -0.3
+  combo:
+    sentiment_buy: 0.2
+    sentiment_sell: -0.2
+    rsi_buy: 40
+    rsi_sell: 60
+  mean_reversion:
+    extreme_positive: 0.5
+    extreme_negative: -0.5
+  ensemble:
+    sentiment_weight: 0.6
+    technical_weight: 0.4
