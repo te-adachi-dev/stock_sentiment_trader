@@ -17,6 +17,8 @@ def generate_signals(
         return _strategy_combo(sentiment_df, technical_df, params)
     elif strategy == "mean_reversion":
         return _strategy_mean_reversion(sentiment_df, technical_df, params)
+    elif strategy == "adaptive":
+        return _strategy_adaptive(sentiment_df, technical_df, params)
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
 
@@ -99,6 +101,43 @@ def _strategy_mean_reversion(
     merged["signal"] = signals
     logger.info(
         f"Mean reversion strategy: {sum(s == 1 for s in signals)} BUY, "
+        f"{sum(s == -1 for s in signals)} SELL, "
+        f"{sum(s == 0 for s in signals)} HOLD"
+    )
+    return merged
+
+
+def _strategy_adaptive(
+    sentiment_df: pd.DataFrame,
+    technical_df: pd.DataFrame,
+    params: dict,
+) -> pd.DataFrame:
+    lookback = params.get("lookback_days", 20)
+    sigma_mult = params.get("sigma_multiplier", 1.0)
+
+    merged = _merge_data(sentiment_df, technical_df)
+    scores = merged["sentiment_score"]
+    signals: list[int] = []
+    for i in range(len(merged)):
+        if i < lookback:
+            signals.append(0)
+            continue
+        window = scores.iloc[i - lookback : i]
+        mean = window.mean()
+        std = window.std()
+        if std == 0:
+            signals.append(0)
+            continue
+        current = scores.iloc[i]
+        if current > mean + sigma_mult * std:
+            signals.append(1)
+        elif current < mean - sigma_mult * std:
+            signals.append(-1)
+        else:
+            signals.append(0)
+    merged["signal"] = signals
+    logger.info(
+        f"Adaptive strategy: {sum(s == 1 for s in signals)} BUY, "
         f"{sum(s == -1 for s in signals)} SELL, "
         f"{sum(s == 0 for s in signals)} HOLD"
     )

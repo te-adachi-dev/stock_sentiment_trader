@@ -198,6 +198,23 @@ def main() -> None:
         logger.error("Failed to generate any sentiment data. Cannot run backtest.")
         sys.exit(1)
 
+    import numpy as np
+    logger.info("Sentiment score distribution (net = positive - negative):")
+    for symbol, sdf in sentiment_data.items():
+        sent_copy = sdf.copy()
+        sent_copy["date"] = pd.to_datetime(sent_copy["datetime"]).dt.date
+        daily = sent_copy.groupby("date").agg(
+            pos=("positive", "mean"), neg=("negative", "mean"),
+        ).reset_index()
+        daily["net_score"] = daily["pos"] - daily["neg"]
+        s = daily["net_score"]
+        pcts = np.percentile(s.dropna(), [10, 25, 50, 75, 90])
+        logger.info(
+            f"  {symbol}: mean={s.mean():.4f}, std={s.std():.4f}, "
+            f"p10={pcts[0]:.4f}, p25={pcts[1]:.4f}, p50={pcts[2]:.4f}, "
+            f"p75={pcts[3]:.4f}, p90={pcts[4]:.4f}"
+        )
+
     available_symbols = [
         s for s in tier_a_symbols
         if s in stock_data and s in sentiment_data
@@ -206,14 +223,17 @@ def main() -> None:
 
     strategies = {
         "threshold": strategy_config.get("threshold", {
-            "buy_threshold": 0.3, "sell_threshold": -0.3,
+            "buy_threshold": 0.1, "sell_threshold": -0.1,
         }),
         "combo": strategy_config.get("combo", {
-            "sentiment_buy": 0.2, "sentiment_sell": -0.2,
-            "rsi_buy": 40, "rsi_sell": 60,
+            "sentiment_buy": 0.05, "sentiment_sell": -0.05,
+            "rsi_buy": 45, "rsi_sell": 55,
         }),
         "mean_reversion": strategy_config.get("mean_reversion", {
-            "extreme_positive": 0.5, "extreme_negative": -0.5,
+            "extreme_positive": 0.3, "extreme_negative": -0.3,
+        }),
+        "adaptive": strategy_config.get("adaptive", {
+            "lookback_days": 20, "sigma_multiplier": 1.0,
         }),
     }
 

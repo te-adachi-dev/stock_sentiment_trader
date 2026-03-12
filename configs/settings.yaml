@@ -53,16 +53,19 @@ backtest:
 
 strategy:
   threshold:
-    buy_threshold: 0.3
-    sell_threshold: -0.3
+    buy_threshold: 0.1
+    sell_threshold: -0.1
   combo:
-    sentiment_buy: 0.2
-    sentiment_sell: -0.2
-    rsi_buy: 40
-    rsi_sell: 60
+    sentiment_buy: 0.05
+    sentiment_sell: -0.05
+    rsi_buy: 45
+    rsi_sell: 55
   mean_reversion:
-    extreme_positive: 0.5
-    extreme_negative: -0.5
+    extreme_positive: 0.3
+    extreme_negative: -0.3
+  adaptive:
+    lookback_days: 20
+    sigma_multiplier: 1.0
   ensemble:
     sentiment_weight: 0.6
     technical_weight: 0.4
