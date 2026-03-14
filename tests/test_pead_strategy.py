@@ -58,6 +58,45 @@ class TestScreener:
         assert result.iloc[0]["symbol"] == "ITEM_B"
 
 
+    def test_volume_filter_skipped_when_multiplier_zero(self) -> None:
+        earnings = pd.DataFrame({
+            "date": ["2024-01-10", "2024-01-15"],
+            "symbol": ["ITEM_A", "ITEM_B"],
+            "eps_actual": [1.5, 2.0],
+            "eps_estimate": [1.0, 1.0],
+            "surprise_pct": [50.0, 100.0],
+            "sue": [2.5, 4.0],
+            "ear": [0.03, 0.05],
+        })
+        price_data = {
+            "ITEM_A": _make_price_df(),
+            "ITEM_B": _make_price_df(),
+        }
+        result = screen_pead_candidates(
+            earnings, price_data,
+            {"surprise_threshold_pct": 5.0, "volume_spike_multiplier": 0.0, "check_volume": True},
+        )
+        assert len(result) == 2
+        assert set(result["symbol"].tolist()) == {"ITEM_A", "ITEM_B"}
+
+    def test_volume_filter_applied_when_multiplier_positive(self) -> None:
+        earnings = pd.DataFrame({
+            "date": ["2024-01-10"],
+            "symbol": ["ITEM_A"],
+            "eps_actual": [1.5],
+            "eps_estimate": [1.0],
+            "surprise_pct": [50.0],
+            "sue": [2.5],
+            "ear": [0.03],
+        })
+        price_data = {"ITEM_A": _make_price_df()}
+        result = screen_pead_candidates(
+            earnings, price_data,
+            {"surprise_threshold_pct": 5.0, "volume_spike_multiplier": 5.0, "check_volume": True},
+        )
+        assert len(result) <= 1
+
+
 class TestPeadStrategy:
     def test_entry_after_exit(self) -> None:
         candidates = pd.DataFrame({

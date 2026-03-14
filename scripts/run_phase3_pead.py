@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import argparse
+import itertools
 import sys
 import time
 from pathlib import Path
@@ -197,27 +199,15 @@ def _save_pead_figures(
     logger.info(f"Saved PEAD figures to {save_dir}")
 
 
-def main() -> None:
-    logger.info("Starting Phase 3 PEAD Strategy Pipeline")
-    logger.info("=" * 70)
-
-    config = load_config()
+def _prepare_data(
+    config: dict,
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], float]:
     pead_config = config.get("pead", {})
     api_keys = config.get("api_keys", {})
     finnhub_key = api_keys.get("finnhub")
 
     start_year = pead_config.get("backtest", {}).get("start_year", 2022)
     end_year = pead_config.get("backtest", {}).get("end_year", 2025)
-    holding_periods = pead_config.get("holding_periods", [5, 10, 20, 40, 60])
-    surprise_threshold = pead_config.get("surprise_threshold_pct", 5.0)
-    volume_spike = pead_config.get("volume_spike_multiplier", 1.5)
-    max_positions = pead_config.get("max_positions", 10)
-    position_size = pead_config.get("position_size_pct", 0.10)
-    stop_loss = pead_config.get("stop_loss_pct", 0.08)
-    entry_delay = pead_config.get("entry_delay_days", 1)
-    initial_capital = pead_config.get("backtest", {}).get("initial_capital", 100_000)
-    commission = pead_config.get("backtest", {}).get("commission_per_share", 0.005)
-    slippage = pead_config.get("backtest", {}).get("slippage_pct", 0.0005)
     risk_free_rate = config.get("backtest", {}).get("risk_free_rate", 0.045)
 
     logger.info("Step 1: Getting S&P 500 symbol universe...")
@@ -292,13 +282,219 @@ def main() -> None:
     earnings_with_sue = calculate_sue(earnings_in_universe)
     earnings_with_ear = calculate_ear(earnings_with_sue, price_data)
 
+    return earnings_with_ear, price_data, risk_free_rate
+
+
+def _run_single_backtest(
+    earnings_with_ear: pd.DataFrame,
+    price_data: dict[str, pd.DataFrame],
+    surprise_threshold: float,
+    volume_spike: float,
+    stop_loss: float,
+    position_size: float,
+    holding_period: int,
+    entry_delay: int,
+    max_positions: int,
+    initial_capital: float,
+    commission: float,
+    slippage: float,
+    risk_free_rate: float,
+) -> dict:
+    candidates = screen_pead_candidates(
+        earnings_with_ear, price_data,
+        {
+            "surprise_threshold_pct": surprise_threshold,
+            "volume_spike_multiplier": volume_spike,
+            "check_volume": volume_spike > 0 and bool(price_data),
+        },
+    )
+
+    if candidates.empty:
+        return {
+            "total_return_pct": 0.0,
+            "sharpe_ratio": 0.0,
+            "max_drawdown_pct": 0.0,
+            "win_rate_pct": 0.0,
+            "total_trades": 0,
+            "avg_trade_return_pct": 0.0,
+            "profit_factor": 0.0,
+        }
+
+    pead_params = {
+        "entry_delay_days": entry_delay,
+        "stop_loss_pct": stop_loss,
+        "max_positions": max_positions,
+    }
+
+    trades = generate_pead_trades(candidates, price_data, holding_period, pead_params)
+
+    result = run_pead_backtest(
+        trades=trades,
+        initial_capital=initial_capital,
+        position_size_pct=position_size,
+        commission_per_share=commission,
+        slippage_pct=slippage,
+    )
+
+    metrics = calculate_metrics(
+        equity_curve=result.equity_curve,
+        daily_returns=result.daily_returns,
+        trades=result.trades,
+        risk_free_rate=risk_free_rate,
+    )
+
+    return metrics
+
+
+def run_sweep(config: dict) -> None:
+    logger.info("Starting Parameter Sweep Mode")
+    logger.info("=" * 70)
+
+    pead_config = config.get("pead", {})
+    entry_delay = pead_config.get("entry_delay_days", 1)
+    max_positions = pead_config.get("max_positions", 10)
+    initial_capital = pead_config.get("backtest", {}).get("initial_capital", 100_000)
+    commission = pead_config.get("backtest", {}).get("commission_per_share", 0.005)
+    slippage = pead_config.get("backtest", {}).get("slippage_pct", 0.0005)
+
+    earnings_with_ear, price_data, risk_free_rate = _prepare_data(config)
+
+    surprise_thresholds = [2.0, 3.0, 5.0, 7.0, 10.0]
+    stop_losses = [0.03, 0.05, 0.08, 0.10]
+    position_sizes = [0.03, 0.05, 0.10]
+    holding_periods = [5, 10, 20, 40, 60]
+
+    combos = list(itertools.product(
+        surprise_thresholds, stop_losses, position_sizes, holding_periods,
+    ))
+    total = len(combos)
+    logger.info(f"Total parameter combinations: {total}")
+
+    results: list[dict] = []
+    for idx, (st, sl, ps, hp) in enumerate(combos):
+        if (idx + 1) % 50 == 0 or idx == 0:
+            logger.info(f"Sweep progress: {idx + 1}/{total}")
+
+        metrics = _run_single_backtest(
+            earnings_with_ear=earnings_with_ear,
+            price_data=price_data,
+            surprise_threshold=st,
+            volume_spike=0.0,
+            stop_loss=sl,
+            position_size=ps,
+            holding_period=hp,
+            entry_delay=entry_delay,
+            max_positions=max_positions,
+            initial_capital=initial_capital,
+            commission=commission,
+            slippage=slippage,
+            risk_free_rate=risk_free_rate,
+        )
+
+        results.append({
+            "surprise_threshold": st,
+            "stop_loss": sl,
+            "position_size": ps,
+            "holding_period": hp,
+            "total_return": metrics["total_return_pct"],
+            "sharpe": metrics["sharpe_ratio"],
+            "max_dd": metrics["max_drawdown_pct"],
+            "win_rate": metrics["win_rate_pct"],
+            "trades": metrics["total_trades"],
+            "profit_factor": metrics.get("profit_factor", 0),
+        })
+
+    results_df = pd.DataFrame(results)
+    save_dir = Path("data/results/pead")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    results_df.to_csv(save_dir / "sweep_results.csv", index=False, encoding="utf-8")
+    logger.info(f"Saved sweep results: {len(results_df)} rows -> {save_dir / 'sweep_results.csv'}")
+
+    go_mask = (
+        (results_df["sharpe"] >= 0.8)
+        & (results_df["max_dd"] <= 25.0)
+        & (results_df["win_rate"] >= 55.0)
+        & (results_df["trades"] >= 50)
+    )
+    go_results = results_df[go_mask].sort_values("sharpe", ascending=False)
+
+    lines: list[str] = []
+    lines.append("=" * 70)
+    lines.append("Parameter Sweep - Best Configurations")
+    lines.append("=" * 70)
+    lines.append("")
+
+    if len(go_results) > 0:
+        lines.append(f"Found {len(go_results)} configurations meeting Go/No-Go criteria:")
+        lines.append("")
+        lines.append(tabulate(
+            go_results.head(20).values.tolist(),
+            headers=list(go_results.columns),
+            tablefmt="grid",
+            floatfmt=".2f",
+        ))
+    else:
+        lines.append("No configurations met all Go/No-Go criteria.")
+        lines.append("")
+        lines.append("Top 10 by Sharpe ratio:")
+        lines.append("")
+        top10 = results_df.sort_values("sharpe", ascending=False).head(10)
+        lines.append(tabulate(
+            top10.values.tolist(),
+            headers=list(top10.columns),
+            tablefmt="grid",
+            floatfmt=".2f",
+        ))
+
+    best_text = "\n".join(lines)
+    with open(save_dir / "sweep_best.txt", "w", encoding="utf-8") as f:
+        f.write(best_text)
+    logger.info(f"Saved sweep best: {save_dir / 'sweep_best.txt'}")
+
+    print("\n")
+    top5 = results_df.sort_values("sharpe", ascending=False).head(5)
+    print("Top 5 configurations by Sharpe:")
+    print(tabulate(
+        top5.values.tolist(),
+        headers=list(top5.columns),
+        tablefmt="grid",
+        floatfmt=".2f",
+    ))
+    print("\n")
+
+    logger.info("=" * 70)
+    logger.info("Parameter Sweep Complete")
+    logger.info("=" * 70)
+
+
+def main() -> None:
+    logger.info("Starting Phase 3 PEAD Strategy Pipeline")
+    logger.info("=" * 70)
+
+    config = load_config()
+    pead_config = config.get("pead", {})
+
+    surprise_threshold = pead_config.get("surprise_threshold_pct", 5.0)
+    volume_spike = pead_config.get("volume_spike_multiplier", 1.5)
+    max_positions = pead_config.get("max_positions", 10)
+    position_size = pead_config.get("position_size_pct", 0.10)
+    stop_loss = pead_config.get("stop_loss_pct", 0.08)
+    entry_delay = pead_config.get("entry_delay_days", 1)
+    holding_periods = pead_config.get("holding_periods", [5, 10, 20, 40, 60])
+    initial_capital = pead_config.get("backtest", {}).get("initial_capital", 100_000)
+    commission = pead_config.get("backtest", {}).get("commission_per_share", 0.005)
+    slippage = pead_config.get("backtest", {}).get("slippage_pct", 0.0005)
+    risk_free_rate = config.get("backtest", {}).get("risk_free_rate", 0.045)
+
+    earnings_with_ear, price_data, _ = _prepare_data(config)
+
     logger.info("Step 5: Screening PEAD candidates...")
     candidates = screen_pead_candidates(
         earnings_with_ear, price_data,
         {
             "surprise_threshold_pct": surprise_threshold,
             "volume_spike_multiplier": volume_spike,
-            "check_volume": bool(price_data),
+            "check_volume": volume_spike > 0 and bool(price_data),
         },
     )
     logger.info(f"PEAD candidates: {len(candidates)}")
@@ -479,4 +675,11 @@ def _generate_pead_report(
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Phase 3 PEAD Strategy")
+    parser.add_argument("--sweep", action="store_true", help="Run parameter sweep")
+    args = parser.parse_args()
+
+    if args.sweep:
+        run_sweep(load_config())
+    else:
+        main()
