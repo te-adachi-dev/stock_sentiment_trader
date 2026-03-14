@@ -81,11 +81,11 @@ pead:
     - 40
     - 60
   entry_delay_days: 1
-  surprise_threshold_pct: 5.0
-  volume_spike_multiplier: 1.5
+  surprise_threshold_pct: 3.0
+  volume_spike_multiplier: 0.0
   max_positions: 10
-  position_size_pct: 0.10
-  stop_loss_pct: 0.08
+  position_size_pct: 0.05
+  stop_loss_pct: 0.05
   backtest:
     initial_capital: 100000
     commission_per_share: 0.005
