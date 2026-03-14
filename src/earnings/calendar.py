@@ -110,9 +110,9 @@ def fetch_company_earnings(
     rows: list[dict] = []
     for r in records:
         rows.append({
-            "period": r.get("period", ""),
-            "actual": r.get("actual"),
-            "estimate": r.get("estimate"),
+            "date": r.get("period", ""),
+            "eps_actual": r.get("actual"),
+            "eps_estimate": r.get("estimate"),
             "surprise": r.get("surprise"),
             "surprise_pct": r.get("surprisePercent"),
             "symbol": symbol,
