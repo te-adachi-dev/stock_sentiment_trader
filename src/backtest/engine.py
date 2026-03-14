@@ -326,3 +326,131 @@ class BacktestEngine:
         if val is None or pd.isna(val):
             return None
         return float(val)
+
+
+def run_pead_backtest(
+    trades: list[dict],
+    initial_capital: float,
+    position_size_pct: float,
+    commission_per_share: float,
+    slippage_pct: float,
+) -> BacktestResult:
+    if not trades:
+        return BacktestResult(
+            trades=[], equity_curve=pd.Series(dtype=float),
+            daily_returns=pd.Series(dtype=float), metrics={},
+            strategy_name="pead", params={},
+        )
+
+    sorted_trades = sorted(trades, key=lambda t: t["entry_date"])
+
+    capital = initial_capital
+    completed_trades: list[dict] = []
+
+    all_dates: set = set()
+    for t in sorted_trades:
+        entry = pd.Timestamp(t["entry_date"])
+        exit_d = pd.Timestamp(t["exit_date"])
+        current = entry
+        while current <= exit_d:
+            if current.weekday() < 5:
+                all_dates.add(current.date())
+            current += pd.Timedelta(days=1)
+
+    if not all_dates:
+        return BacktestResult(
+            trades=[], equity_curve=pd.Series(dtype=float),
+            daily_returns=pd.Series(dtype=float), metrics={},
+            strategy_name="pead", params={},
+        )
+
+    date_list = sorted(all_dates)
+    active_positions: list[dict] = []
+    equity_records: list[dict] = []
+
+    trade_queue = list(sorted_trades)
+
+    for current_date in date_list:
+        closed_indices: list[int] = []
+        for i, pos in enumerate(active_positions):
+            exit_dt = pd.Timestamp(pos["exit_date"]).date()
+            if current_date >= exit_dt:
+                exit_price = pos["exit_price"]
+                exit_price_adj = exit_price * (1 - slippage_pct)
+                proceeds = pos["shares"] * exit_price_adj
+                commission = pos["shares"] * commission_per_share
+                capital += proceeds - commission
+
+                pnl = (
+                    pos["shares"] * exit_price_adj
+                    - pos["shares"] * commission_per_share
+                    - pos["cost_basis"]
+                )
+
+                completed_trades.append({
+                    **pos["trade_info"],
+                    "pnl": pnl,
+                    "shares": pos["shares"],
+                })
+                closed_indices.append(i)
+
+        for i in sorted(closed_indices, reverse=True):
+            active_positions.pop(i)
+
+        new_entries: list[dict] = []
+        for t in trade_queue:
+            entry_dt = pd.Timestamp(t["entry_date"]).date()
+            if entry_dt == current_date:
+                new_entries.append(t)
+
+        for t in new_entries:
+            trade_queue.remove(t)
+            alloc = initial_capital * position_size_pct
+            entry_price = t["entry_price"] * (1 + slippage_pct)
+            shares = int(alloc / entry_price)
+            if shares <= 0:
+                continue
+            cost = shares * entry_price + shares * commission_per_share
+            if cost > capital:
+                shares = int((capital * 0.95) / (entry_price + commission_per_share))
+                if shares <= 0:
+                    continue
+                cost = shares * entry_price + shares * commission_per_share
+
+            capital -= cost
+            active_positions.append({
+                "shares": shares,
+                "entry_price": entry_price,
+                "exit_price": t["exit_price"],
+                "exit_date": t["exit_date"],
+                "cost_basis": cost,
+                "trade_info": t,
+            })
+
+        unrealized = sum(
+            pos["shares"] * pos["exit_price"] - pos["cost_basis"]
+            for pos in active_positions
+        )
+        equity_records.append({"date": current_date, "equity": capital + unrealized})
+
+    equity_df = pd.DataFrame(equity_records)
+    if equity_df.empty:
+        equity_curve = pd.Series(dtype=float)
+        daily_returns = pd.Series(dtype=float)
+    else:
+        equity_curve = equity_df.set_index("date")["equity"]
+        daily_returns = equity_curve.pct_change().dropna()
+
+    logger.info(
+        f"PEAD backtest complete: {len(completed_trades)} trades, "
+        f"final equity {equity_curve.iloc[-1] if not equity_curve.empty else 0:.2f}"
+    )
+
+    return BacktestResult(
+        trades=completed_trades,
+        equity_curve=equity_curve,
+        daily_returns=daily_returns,
+        metrics={},
+        strategy_name="pead",
+        params={"position_size_pct": position_size_pct},
+    )

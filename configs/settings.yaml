@@ -69,3 +69,26 @@ strategy:
   ensemble:
     sentiment_weight: 0.6
     technical_weight: 0.4
+
+pead:
+  target_universe: "sp500"
+  min_market_cap_billion: 10
+  lookback_quarters: 8
+  holding_periods:
+    - 5
+    - 10
+    - 20
+    - 40
+    - 60
+  entry_delay_days: 1
+  surprise_threshold_pct: 5.0
+  volume_spike_multiplier: 1.5
+  max_positions: 10
+  position_size_pct: 0.10
+  stop_loss_pct: 0.08
+  backtest:
+    initial_capital: 100000
+    commission_per_share: 0.005
+    slippage_pct: 0.0005
+    start_year: 2022
+    end_year: 2025
