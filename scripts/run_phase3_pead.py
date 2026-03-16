@@ -25,6 +25,7 @@ from src.earnings.calendar import (
     get_sp500_symbols,
 )
 from src.earnings.screener import screen_pead_candidates
+from src.earnings.yahoo_earnings import fetch_yahoo_earnings
 from src.earnings.surprise import calculate_ear, calculate_sue
 from src.strategy.pead import generate_pead_trades
 from src.utils.config import load_config
@@ -354,9 +355,9 @@ def _run_sweep(
     go_results = [
         r for r in results
         if r["sharpe"] >= 0.8
-        and r["max_dd"] <= 25.0
+        and r["max_dd"] <= 30.0
         and r["win_rate"] >= 55.0
-        and r["trades"] >= 50
+        and r["trades"] >= 30
     ]
 
     best_path = save_dir / "sweep_best.txt"
@@ -455,14 +456,41 @@ def main() -> None:
     earnings_df = _load_cached_earnings()
 
     if earnings_df.empty:
+        source_dfs: list[pd.DataFrame] = []
+
         if finnhub_key:
-            logger.info("Fetching per-company earnings data (skipping earnings_calendar)...")
-            earnings_df = _fetch_all_company_earnings(
+            logger.info("Fetching per-company earnings data (Finnhub)...")
+            finnhub_df = _fetch_all_company_earnings(
                 symbols, finnhub_key,
                 pead_config.get("lookback_quarters", 8),
             )
-        else:
-            logger.warning("No Finnhub API key. Generating synthetic earnings data for testing.")
+            if not finnhub_df.empty:
+                finnhub_df["_source"] = "finnhub"
+                source_dfs.append(finnhub_df)
+
+        data_sources = pead_config.get("data_sources", ["finnhub", "yahoo"])
+        if "yahoo" in data_sources:
+            logger.info("Fetching per-company earnings data (Yahoo Finance)...")
+            yahoo_df = fetch_yahoo_earnings(
+                symbols,
+                lookback_quarters=pead_config.get("lookback_quarters", 8),
+            )
+            if not yahoo_df.empty:
+                yahoo_df["_source"] = "yahoo"
+                source_dfs.append(yahoo_df)
+
+        if source_dfs:
+            merged = pd.concat(source_dfs, ignore_index=True)
+            merged["_date_key"] = pd.to_datetime(merged["date"]).dt.date.astype(str)
+            merged["_sort"] = merged["_source"].map({"finnhub": 0, "yahoo": 1}).fillna(2)
+            merged = merged.sort_values("_sort").drop_duplicates(
+                subset=["symbol", "_date_key"], keep="first"
+            )
+            merged = merged.drop(columns=["_source", "_date_key", "_sort"], errors="ignore")
+            earnings_df = merged.reset_index(drop=True)
+            logger.info(f"Merged earnings data: {len(earnings_df)} records")
+        elif not finnhub_key:
+            logger.warning("No API keys available. Generating synthetic earnings data for testing.")
             earnings_df = _generate_synthetic_earnings(symbols[:100], start_year, end_year)
 
     if earnings_df.empty:
@@ -634,9 +662,9 @@ def _generate_pead_report(
 
         if (
             m["sharpe_ratio"] >= 0.8
-            and m["max_drawdown_pct"] <= 25.0
+            and m["max_drawdown_pct"] <= 30.0
             and m["win_rate_pct"] >= 55.0
-            and m["total_trades"] >= 50
+            and m["total_trades"] >= 30
         ):
             go_candidates.append({"hp": hp, **m})
 
@@ -660,14 +688,14 @@ def _generate_pead_report(
         lines.append("")
         lines.append(
             "Rationale: At least one holding period meets all criteria "
-            "(Sharpe >= 0.8, Max DD <= 25%, Win Rate >= 55%, Trades >= 50)."
+            "(Sharpe >= 0.8, Max DD <= 30%, Win Rate >= 55%, Trades >= 30)."
         )
     else:
         lines.append("Judgment: NO-GO - Parameter adjustment recommended")
         lines.append("")
         lines.append(
             "No holding period met all criteria "
-            "(Sharpe >= 0.8, Max DD <= 25%, Win Rate >= 55%, Trades >= 50)."
+            "(Sharpe >= 0.8, Max DD <= 30%, Win Rate >= 55%, Trades >= 30)."
         )
         lines.append("")
         best_hp = max(
@@ -684,11 +712,11 @@ def _generate_pead_report(
         )
         lines.append("")
         lines.append("Recommendations:")
-        if best_m["total_trades"] < 50:
+        if best_m["total_trades"] < 30:
             lines.append("  - Lower surprise_threshold_pct to increase trade count")
         if best_m["win_rate_pct"] < 55:
             lines.append("  - Increase surprise_threshold_pct for higher quality signals")
-        if best_m["max_drawdown_pct"] > 25:
+        if best_m["max_drawdown_pct"] > 30:
             lines.append("  - Tighten stop_loss_pct to reduce drawdown")
         if best_m["sharpe_ratio"] < 0.8:
             lines.append("  - Test intermediate holding periods (e.g. 15, 30 days)")

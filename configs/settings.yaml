@@ -71,6 +71,9 @@ strategy:
     technical_weight: 0.4
 
 pead:
+  data_sources:
+    - finnhub
+    - yahoo
   target_universe: "sp500"
   min_market_cap_billion: 10
   lookback_quarters: 8

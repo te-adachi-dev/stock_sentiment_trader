@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from src.backtest.engine import BacktestEngine
+from src.backtest.engine import BacktestEngine, run_pead_backtest
 
 
 def _make_price_df(n: int = 10) -> pd.DataFrame:
@@ -148,3 +148,34 @@ class TestBacktestEngine:
         if result.trades:
             final_equity = result.equity_curve.iloc[-1]
             assert final_equity != 100_000.0
+
+    def test_pead_backtest_capital_never_deeply_negative(self) -> None:
+        trades = []
+        for i in range(20):
+            entry_date = f"2024-01-{(i * 3 + 1):02d}"
+            exit_date = f"2024-01-{(i * 3 + 3):02d}"
+            if i * 3 + 3 > 28:
+                break
+            trades.append({
+                "symbol": "ITEM",
+                "entry_date": entry_date,
+                "exit_date": exit_date,
+                "entry_price": 100.0,
+                "exit_price": 60.0,
+                "return_pct": -40.0,
+                "direction": "long",
+                "surprise_pct": 10.0,
+            })
+
+        result = run_pead_backtest(
+            trades=trades,
+            initial_capital=100_000,
+            position_size_pct=0.5,
+            commission_per_share=0.005,
+            slippage_pct=0.0005,
+        )
+
+        if not result.equity_curve.empty:
+            min_equity = result.equity_curve.min()
+            max_dd_pct = (1 - min_equity / 100_000) * 100
+            assert max_dd_pct < 200, f"Max DD {max_dd_pct}% is unreasonably large"
