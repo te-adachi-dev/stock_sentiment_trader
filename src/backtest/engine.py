@@ -405,7 +405,9 @@ def run_pead_backtest(
 
         for t in new_entries:
             trade_queue.remove(t)
-            alloc = initial_capital * position_size_pct
+            if capital <= 0:
+                continue
+            alloc = min(capital, initial_capital) * position_size_pct
             entry_price = t["entry_price"] * (1 + slippage_pct)
             shares = int(alloc / entry_price)
             if shares <= 0:

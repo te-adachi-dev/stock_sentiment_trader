@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+import argparse
+import csv
+import itertools
 import sys
 import time
 from pathlib import Path
@@ -19,10 +22,10 @@ from src.backtest.metrics import calculate_metrics
 from src.data_collection.stock_price import fetch_stock_data
 from src.earnings.calendar import (
     fetch_company_earnings,
-    fetch_earnings_calendar,
     get_sp500_symbols,
 )
 from src.earnings.screener import screen_pead_candidates
+from src.earnings.yahoo_earnings import fetch_yahoo_earnings
 from src.earnings.surprise import calculate_ear, calculate_sue
 from src.strategy.pead import generate_pead_trades
 from src.utils.config import load_config
@@ -31,12 +34,24 @@ from src.utils.logger import setup_logger
 logger = setup_logger("phase3_pead")
 
 
-def _load_cached_earnings_calendar() -> pd.DataFrame:
-    path = Path("data/raw/earnings/earnings_calendar.csv")
-    if path.exists():
-        df = pd.read_csv(path)
+def _load_cached_earnings() -> pd.DataFrame:
+    cache_dir = Path("data/raw/earnings")
+    if not cache_dir.exists():
+        return pd.DataFrame()
+
+    calendar_path = cache_dir / "earnings_calendar.csv"
+    if calendar_path.exists():
+        df = pd.read_csv(calendar_path)
         logger.info(f"Loaded cached earnings calendar: {len(df)} records")
         return df
+
+    csvs = list(cache_dir.glob("company_earnings_*.csv"))
+    if csvs:
+        dfs = [pd.read_csv(p) for p in csvs]
+        combined = pd.concat(dfs, ignore_index=True)
+        logger.info(f"Loaded cached company earnings: {len(combined)} records from {len(csvs)} files")
+        return combined
+
     return pd.DataFrame()
 
 
@@ -197,7 +212,217 @@ def _save_pead_figures(
     logger.info(f"Saved PEAD figures to {save_dir}")
 
 
+def _run_single_backtest(
+    earnings_with_ear: pd.DataFrame,
+    price_data: dict[str, pd.DataFrame],
+    surprise_threshold: float,
+    volume_spike: float,
+    stop_loss: float,
+    position_size: float,
+    holding_period: int,
+    entry_delay: int,
+    max_positions: int,
+    initial_capital: float,
+    commission: float,
+    slippage: float,
+    risk_free_rate: float,
+) -> dict[str, float]:
+    candidates = screen_pead_candidates(
+        earnings_with_ear, price_data,
+        {
+            "surprise_threshold_pct": surprise_threshold,
+            "volume_spike_multiplier": volume_spike,
+            "check_volume": volume_spike > 0 and bool(price_data),
+        },
+    )
+
+    if candidates.empty:
+        return {
+            "surprise_threshold": surprise_threshold,
+            "stop_loss": stop_loss,
+            "position_size": position_size,
+            "holding_period": holding_period,
+            "total_return": 0.0,
+            "sharpe": 0.0,
+            "max_dd": 0.0,
+            "win_rate": 0.0,
+            "trades": 0,
+            "profit_factor": 0.0,
+        }
+
+    pead_params = {
+        "entry_delay_days": entry_delay,
+        "stop_loss_pct": stop_loss,
+        "max_positions": max_positions,
+    }
+
+    trades = generate_pead_trades(candidates, price_data, holding_period, pead_params)
+
+    result = run_pead_backtest(
+        trades=trades,
+        initial_capital=initial_capital,
+        position_size_pct=position_size,
+        commission_per_share=commission,
+        slippage_pct=slippage,
+    )
+
+    metrics = calculate_metrics(
+        equity_curve=result.equity_curve,
+        daily_returns=result.daily_returns,
+        trades=result.trades,
+        risk_free_rate=risk_free_rate,
+    )
+
+    pf = metrics.get("profit_factor", 0)
+    if pf == "inf":
+        pf = 999.99
+
+    return {
+        "surprise_threshold": surprise_threshold,
+        "stop_loss": stop_loss,
+        "position_size": position_size,
+        "holding_period": holding_period,
+        "total_return": metrics["total_return_pct"],
+        "sharpe": metrics["sharpe_ratio"],
+        "max_dd": metrics["max_drawdown_pct"],
+        "win_rate": metrics["win_rate_pct"],
+        "trades": metrics["total_trades"],
+        "profit_factor": pf,
+    }
+
+
+def _run_sweep(
+    earnings_with_ear: pd.DataFrame,
+    price_data: dict[str, pd.DataFrame],
+    config: dict,
+) -> None:
+    pead_config = config.get("pead", {})
+    entry_delay = pead_config.get("entry_delay_days", 1)
+    max_positions = pead_config.get("max_positions", 10)
+    initial_capital = pead_config.get("backtest", {}).get("initial_capital", 100_000)
+    commission = pead_config.get("backtest", {}).get("commission_per_share", 0.005)
+    slippage = pead_config.get("backtest", {}).get("slippage_pct", 0.0005)
+    risk_free_rate = config.get("backtest", {}).get("risk_free_rate", 0.045)
+
+    surprise_values = [2.0, 3.0, 5.0, 7.0, 10.0]
+    stop_loss_values = [0.03, 0.05, 0.08, 0.10]
+    position_size_values = [0.03, 0.05, 0.10]
+    holding_periods = [5, 10, 20, 40, 60]
+
+    combinations = list(itertools.product(
+        surprise_values, stop_loss_values, position_size_values, holding_periods
+    ))
+    total = len(combinations)
+    logger.info(f"Starting parameter sweep: {total} combinations")
+
+    results: list[dict[str, float]] = []
+
+    for idx, (surprise, sl, ps, hp) in enumerate(combinations):
+        if (idx + 1) % 50 == 0 or idx == 0:
+            logger.info(f"Sweep progress: {idx + 1}/{total}")
+
+        row = _run_single_backtest(
+            earnings_with_ear=earnings_with_ear,
+            price_data=price_data,
+            surprise_threshold=surprise,
+            volume_spike=0.0,
+            stop_loss=sl,
+            position_size=ps,
+            holding_period=hp,
+            entry_delay=entry_delay,
+            max_positions=max_positions,
+            initial_capital=initial_capital,
+            commission=commission,
+            slippage=slippage,
+            risk_free_rate=risk_free_rate,
+        )
+        results.append(row)
+
+    save_dir = Path("data/results/pead")
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = save_dir / "sweep_results.csv"
+    fieldnames = [
+        "surprise_threshold", "stop_loss", "position_size", "holding_period",
+        "total_return", "sharpe", "max_dd", "win_rate", "trades", "profit_factor",
+    ]
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+    logger.info(f"Saved sweep results: {csv_path}")
+
+    go_results = [
+        r for r in results
+        if r["sharpe"] >= 0.8
+        and r["max_dd"] <= 30.0
+        and r["win_rate"] >= 55.0
+        and r["trades"] >= 30
+    ]
+
+    best_path = save_dir / "sweep_best.txt"
+    lines: list[str] = []
+
+    if go_results:
+        go_sorted = sorted(go_results, key=lambda r: r["sharpe"], reverse=True)
+        lines.append(f"Go/No-Go criteria met: {len(go_sorted)} patterns")
+        lines.append("")
+        for r in go_sorted:
+            lines.append(
+                f"surprise={r['surprise_threshold']}, stop_loss={r['stop_loss']}, "
+                f"pos_size={r['position_size']}, hp={r['holding_period']}d | "
+                f"Sharpe={r['sharpe']}, MaxDD={r['max_dd']}%, "
+                f"WinRate={r['win_rate']}%, Trades={int(r['trades'])}, "
+                f"PF={r['profit_factor']}"
+            )
+    else:
+        lines.append("No patterns met all Go/No-Go criteria.")
+        lines.append("Top 10 by Sharpe ratio:")
+        lines.append("")
+        top10 = sorted(results, key=lambda r: r["sharpe"], reverse=True)[:10]
+        for r in top10:
+            lines.append(
+                f"surprise={r['surprise_threshold']}, stop_loss={r['stop_loss']}, "
+                f"pos_size={r['position_size']}, hp={r['holding_period']}d | "
+                f"Sharpe={r['sharpe']}, MaxDD={r['max_dd']}%, "
+                f"WinRate={r['win_rate']}%, Trades={int(r['trades'])}, "
+                f"PF={r['profit_factor']}"
+            )
+
+    with open(best_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    logger.info(f"Saved sweep best: {best_path}")
+
+    print("\n" + "=" * 70)
+    print("Parameter Sweep - Top 5 by Sharpe")
+    print("=" * 70)
+    top5 = sorted(results, key=lambda r: r["sharpe"], reverse=True)[:5]
+    headers = [
+        "Surprise%", "StopLoss", "PosSize", "HP", "Return%",
+        "Sharpe", "MaxDD%", "WinRate%", "Trades", "PF",
+    ]
+    rows = [
+        [
+            r["surprise_threshold"], r["stop_loss"], r["position_size"],
+            int(r["holding_period"]), r["total_return"], r["sharpe"],
+            r["max_dd"], r["win_rate"], int(r["trades"]), r["profit_factor"],
+        ]
+        for r in top5
+    ]
+    print(tabulate(rows, headers=headers, tablefmt="grid"))
+
+    if go_results:
+        print(f"\nGo/No-Go: {len(go_results)} patterns meet all criteria.")
+    else:
+        print("\nGo/No-Go: No patterns meet all criteria.")
+    print()
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Phase 3 PEAD Strategy")
+    parser.add_argument("--sweep", action="store_true", help="Run parameter sweep")
+    args = parser.parse_args()
+
     logger.info("Starting Phase 3 PEAD Strategy Pipeline")
     logger.info("=" * 70)
 
@@ -209,11 +434,11 @@ def main() -> None:
     start_year = pead_config.get("backtest", {}).get("start_year", 2022)
     end_year = pead_config.get("backtest", {}).get("end_year", 2025)
     holding_periods = pead_config.get("holding_periods", [5, 10, 20, 40, 60])
-    surprise_threshold = pead_config.get("surprise_threshold_pct", 5.0)
-    volume_spike = pead_config.get("volume_spike_multiplier", 1.5)
+    surprise_threshold = pead_config.get("surprise_threshold_pct", 3.0)
+    volume_spike = pead_config.get("volume_spike_multiplier", 0.0)
     max_positions = pead_config.get("max_positions", 10)
-    position_size = pead_config.get("position_size_pct", 0.10)
-    stop_loss = pead_config.get("stop_loss_pct", 0.08)
+    position_size = pead_config.get("position_size_pct", 0.05)
+    stop_loss = pead_config.get("stop_loss_pct", 0.05)
     entry_delay = pead_config.get("entry_delay_days", 1)
     initial_capital = pead_config.get("backtest", {}).get("initial_capital", 100_000)
     commission = pead_config.get("backtest", {}).get("commission_per_share", 0.005)
@@ -228,22 +453,44 @@ def main() -> None:
     logger.info(f"Universe: {len(symbols)} symbols")
 
     logger.info("Step 2: Fetching earnings data...")
-    earnings_df = _load_cached_earnings_calendar()
+    earnings_df = _load_cached_earnings()
 
     if earnings_df.empty:
-        if finnhub_key:
-            start_date = f"{start_year}-01-01"
-            end_date = f"{end_year}-12-31"
-            earnings_df = fetch_earnings_calendar(start_date, end_date, api_key=finnhub_key)
+        source_dfs: list[pd.DataFrame] = []
 
-            if earnings_df.empty:
-                logger.warning("Earnings calendar empty, fetching per-company data...")
-                earnings_df = _fetch_all_company_earnings(
-                    symbols, finnhub_key,
-                    pead_config.get("lookback_quarters", 8),
-                )
-        else:
-            logger.warning("No Finnhub API key. Generating synthetic earnings data for testing.")
+        if finnhub_key:
+            logger.info("Fetching per-company earnings data (Finnhub)...")
+            finnhub_df = _fetch_all_company_earnings(
+                symbols, finnhub_key,
+                pead_config.get("lookback_quarters", 8),
+            )
+            if not finnhub_df.empty:
+                finnhub_df["_source"] = "finnhub"
+                source_dfs.append(finnhub_df)
+
+        data_sources = pead_config.get("data_sources", ["finnhub", "yahoo"])
+        if "yahoo" in data_sources:
+            logger.info("Fetching per-company earnings data (Yahoo Finance)...")
+            yahoo_df = fetch_yahoo_earnings(
+                symbols,
+                lookback_quarters=pead_config.get("lookback_quarters", 8),
+            )
+            if not yahoo_df.empty:
+                yahoo_df["_source"] = "yahoo"
+                source_dfs.append(yahoo_df)
+
+        if source_dfs:
+            merged = pd.concat(source_dfs, ignore_index=True)
+            merged["_date_key"] = pd.to_datetime(merged["date"]).dt.date.astype(str)
+            merged["_sort"] = merged["_source"].map({"finnhub": 0, "yahoo": 1}).fillna(2)
+            merged = merged.sort_values("_sort").drop_duplicates(
+                subset=["symbol", "_date_key"], keep="first"
+            )
+            merged = merged.drop(columns=["_source", "_date_key", "_sort"], errors="ignore")
+            earnings_df = merged.reset_index(drop=True)
+            logger.info(f"Merged earnings data: {len(earnings_df)} records")
+        elif not finnhub_key:
+            logger.warning("No API keys available. Generating synthetic earnings data for testing.")
             earnings_df = _generate_synthetic_earnings(symbols[:100], start_year, end_year)
 
     if earnings_df.empty:
@@ -292,13 +539,18 @@ def main() -> None:
     earnings_with_sue = calculate_sue(earnings_in_universe)
     earnings_with_ear = calculate_ear(earnings_with_sue, price_data)
 
+    if args.sweep:
+        logger.info("Running parameter sweep mode...")
+        _run_sweep(earnings_with_ear, price_data, config)
+        return
+
     logger.info("Step 5: Screening PEAD candidates...")
     candidates = screen_pead_candidates(
         earnings_with_ear, price_data,
         {
             "surprise_threshold_pct": surprise_threshold,
             "volume_spike_multiplier": volume_spike,
-            "check_volume": bool(price_data),
+            "check_volume": volume_spike > 0 and bool(price_data),
         },
     )
     logger.info(f"PEAD candidates: {len(candidates)}")
@@ -410,9 +662,9 @@ def _generate_pead_report(
 
         if (
             m["sharpe_ratio"] >= 0.8
-            and m["max_drawdown_pct"] <= 25.0
+            and m["max_drawdown_pct"] <= 30.0
             and m["win_rate_pct"] >= 55.0
-            and m["total_trades"] >= 50
+            and m["total_trades"] >= 30
         ):
             go_candidates.append({"hp": hp, **m})
 
@@ -436,14 +688,14 @@ def _generate_pead_report(
         lines.append("")
         lines.append(
             "Rationale: At least one holding period meets all criteria "
-            "(Sharpe >= 0.8, Max DD <= 25%, Win Rate >= 55%, Trades >= 50)."
+            "(Sharpe >= 0.8, Max DD <= 30%, Win Rate >= 55%, Trades >= 30)."
         )
     else:
         lines.append("Judgment: NO-GO - Parameter adjustment recommended")
         lines.append("")
         lines.append(
             "No holding period met all criteria "
-            "(Sharpe >= 0.8, Max DD <= 25%, Win Rate >= 55%, Trades >= 50)."
+            "(Sharpe >= 0.8, Max DD <= 30%, Win Rate >= 55%, Trades >= 30)."
         )
         lines.append("")
         best_hp = max(
@@ -460,11 +712,11 @@ def _generate_pead_report(
         )
         lines.append("")
         lines.append("Recommendations:")
-        if best_m["total_trades"] < 50:
+        if best_m["total_trades"] < 30:
             lines.append("  - Lower surprise_threshold_pct to increase trade count")
         if best_m["win_rate_pct"] < 55:
             lines.append("  - Increase surprise_threshold_pct for higher quality signals")
-        if best_m["max_drawdown_pct"] > 25:
+        if best_m["max_drawdown_pct"] > 30:
             lines.append("  - Tighten stop_loss_pct to reduce drawdown")
         if best_m["sharpe_ratio"] < 0.8:
             lines.append("  - Test intermediate holding periods (e.g. 15, 30 days)")

@@ -39,7 +39,7 @@ def screen_pead_candidates(
     df = df[df["ear"].notna() & (df["ear"] > 0)]
     after_ear = len(df)
 
-    if check_volume and price_data:
+    if check_volume and price_data and volume_spike_mult > 0:
         volume_ratios: list[float] = []
         for _, row in df.iterrows():
             ratio = _get_volume_ratio(row["symbol"], row["date"], price_data)
